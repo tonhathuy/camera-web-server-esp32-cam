@@ -1,0 +1,58 @@
+# Arduino IDE
+*.hex
+*.elf
+*.map
+
+# Build directories
+build/
+libraries/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# WiFi credentials (if stored separately)
+wifi_config.h
+secrets.h
+
+# SD card content (don't commit actual images)
+*.jpg
+*.jpeg
+*.png
+*.bmp
+test.txt
+
+# Partition files that might contain sensitive data
+# (keeping partitions.csv as it's part of the project)
+
+# Documentation build files
+docs/_build/
+
+# Python cache (if using any Python tools)
+__pycache__/
+*.pyc
+*.pyo
+
+# Node.js (if using any web development tools)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Backup files
+*.bak
+*.backup
