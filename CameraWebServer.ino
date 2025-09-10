@@ -81,8 +81,13 @@ void setup() {
   #define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
   #include "esp_log.h"
 
+  // Disable built-in flash LED to save power (GPIO 4)
   pinMode(4, OUTPUT); 
   digitalWrite(4, LOW);
+  
+  // Disable onboard status LED to save power (GPIO 33 on AI-Thinker)
+  pinMode(33, OUTPUT);
+  digitalWrite(33, LOW);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;

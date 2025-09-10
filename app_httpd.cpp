@@ -94,7 +94,11 @@ static int ra_filter_run(ra_filter_t *filter, int value) {
 #endif
 
 #if CONFIG_LED_ILLUMINATOR_ENABLED
+bool led_enabled = false; // Global LED enable/disable flag for power saving
+
 void enable_led(bool en) {  // Turn LED On or Off
+  if (!led_enabled) return; // Don't turn on LED if globally disabled
+  
   int duty = en ? led_duty : 0;
   if (en && isStreaming && (led_duty > CONFIG_LED_MAX_INTENSITY)) {
     duty = CONFIG_LED_MAX_INTENSITY;
@@ -102,9 +106,18 @@ void enable_led(bool en) {  // Turn LED On or Off
   ledcWrite(LED_LEDC_GPIO, duty);
   //ledc_set_duty(CONFIG_LED_LEDC_SPEED_MODE, CONFIG_LED_LEDC_CHANNEL, duty);
   //ledc_update_duty(CONFIG_LED_LEDC_SPEED_MODE, CONFIG_LED_LEDC_CHANNEL);
-  log_i("Set LED intensity to %d", duty);
+  log_i("Set flash LED intensity to %d (LED enabled: %s)", duty, led_enabled ? "yes" : "no");
 }
 #endif
+
+// Status LED control (GPIO 33)
+bool status_led_enabled = false;
+
+void control_status_led(bool en) {
+  digitalWrite(33, en ? HIGH : LOW);
+  status_led_enabled = en;
+  log_i("Status LED (GPIO 33): %s", en ? "ON" : "OFF");
+}
 
 static esp_err_t bmp_handler(httpd_req_t *req) {
   camera_fb_t *fb = NULL;
@@ -402,7 +415,18 @@ static esp_err_t cmd_handler(httpd_req_t *req) {
       enable_led(true);
     }
   }
+  else if (!strcmp(variable, "led_enabled")) {
+    led_enabled = (val == 1);
+    log_i("Flash LED globally %s", led_enabled ? "enabled" : "disabled");
+    if (!led_enabled) {
+      // Force turn off LED when disabled
+      ledcWrite(LED_LEDC_GPIO, 0);
+    }
+  }
 #endif
+  else if (!strcmp(variable, "status_led")) {
+    control_status_led(val == 1);
+  }
   else {
     log_i("Unknown command: %s", variable);
     res = -1;
@@ -484,9 +508,12 @@ static esp_err_t status_handler(httpd_req_t *req) {
   p += sprintf(p, "\"colorbar\":%u", s->status.colorbar);
 #if CONFIG_LED_ILLUMINATOR_ENABLED
   p += sprintf(p, ",\"led_intensity\":%u", led_duty);
+  p += sprintf(p, ",\"led_enabled\":%d", led_enabled ? 1 : 0);
 #else
   p += sprintf(p, ",\"led_intensity\":%d", -1);
+  p += sprintf(p, ",\"led_enabled\":0");
 #endif
+  p += sprintf(p, ",\"status_led\":%d", status_led_enabled ? 1 : 0);
   *p++ = '}';
   *p++ = 0;
   httpd_resp_set_type(req, "application/json");
@@ -660,7 +687,7 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
   
   // Parse pagination parameters
   int page = 1;
-  int perPage = 20; // Images per page
+  int perPage = 40; // Images per page (increased for smaller thumbnails)
   
   char *buf = NULL;
   size_t buf_len = httpd_req_get_url_query_len(req) + 1;
@@ -693,14 +720,14 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
     ".header{text-align:center;margin-bottom:30px;}", -1);
     
   httpd_resp_send_chunk(req,
-    ".gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:15px;margin-bottom:30px;}"
-    ".image-card{background:white;border-radius:8px;padding:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);transition:transform 0.2s;position:relative;}"
+    ".gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;margin-bottom:20px;}"
+    ".image-card{background:white;border-radius:6px;padding:6px;box-shadow:0 2px 4px rgba(0,0,0,0.1);transition:transform 0.2s;position:relative;}"
     ".image-card:hover{transform:scale(1.05);}"
-    ".image-card img{width:100%;height:150px;object-fit:cover;border-radius:4px;cursor:pointer;background:#f0f0f0;transition:all 0.3s;filter:brightness(0.9);}"
+    ".image-card img{width:100%;height:70px;object-fit:cover;border-radius:3px;cursor:pointer;background:#f0f0f0;transition:all 0.3s;filter:brightness(0.9);}"
     ".image-card img:hover{filter:brightness(1);}"
     ".image-card img.loading{opacity:0.5;background:linear-gradient(90deg,#f0f0f0 25%,#e0e0e0 50%,#f0f0f0 75%);background-size:200% 100%;animation:loading 1.5s infinite;}"
-    ".image-info{margin-top:8px;font-size:12px;color:#666;text-align:center;}"
-    ".new-badge{position:absolute;top:5px;right:5px;background:#ff4444;color:white;padding:2px 6px;border-radius:10px;font-size:10px;font-weight:bold;}"
+    ".image-info{margin-top:4px;font-size:10px;color:#666;text-align:center;}"
+    ".new-badge{position:absolute;top:2px;right:2px;background:#ff4444;color:white;padding:1px 4px;border-radius:8px;font-size:8px;font-weight:bold;}"
     "@keyframes loading{0%{background-position:200% 0;}100%{background-position:-200% 0;}}", -1);
     
   httpd_resp_send_chunk(req,
@@ -1093,8 +1120,38 @@ static esp_err_t home_handler(httpd_req_t *req) {
     "<a href='/capture' class='btn' target='_blank'>📸 Take Photo</a>"
     "<a href='/gallery' class='btn btn-secondary'>🖼️ View Gallery</a>"
     "<a href='/debug' class='btn btn-danger' target='_blank'>🔧 Debug SD</a>"
+    "<br>"
+    "<button id='flashToggle' class='btn' onclick='toggleFlashLED()' style='background:#ff6b35;'>🔦 Flash: Loading...</button>"
+    "<button id='statusToggle' class='btn' onclick='toggleStatusLED()' style='background:#ff6b35;'>🔴 Status: Loading...</button>"
     "<br><br>"
     "<p style='color:#666;font-size:14px;'>Use the buttons above to access camera functions</p>"
+    "<script>"
+    "let flashEnabled = false, statusEnabled = false;"
+    "function toggleFlashLED() {"
+    "  flashEnabled = !flashEnabled;"
+    "  fetch('/control?var=led_enabled&val=' + (flashEnabled ? 1 : 0))"
+    "    .then(r => {"
+    "      document.getElementById('flashToggle').textContent = '🔦 Flash: ' + (flashEnabled ? 'ON' : 'OFF');"
+    "      document.getElementById('flashToggle').style.background = flashEnabled ? '#4CAF50' : '#666';"
+    "    }).catch(e => console.error('Flash LED failed:', e));"
+    "}"
+    "function toggleStatusLED() {"
+    "  statusEnabled = !statusEnabled;"
+    "  fetch('/control?var=status_led&val=' + (statusEnabled ? 1 : 0))"
+    "    .then(r => {"
+    "      document.getElementById('statusToggle').textContent = '🔴 Status: ' + (statusEnabled ? 'ON' : 'OFF');"
+    "      document.getElementById('statusToggle').style.background = statusEnabled ? '#4CAF50' : '#666';"
+    "    }).catch(e => console.error('Status LED failed:', e));"
+    "}"
+    "fetch('/status').then(r=>r.json()).then(d=>{"
+    "  flashEnabled = d.led_enabled === 1;"
+    "  statusEnabled = d.status_led === 1;"
+    "  document.getElementById('flashToggle').textContent = '🔦 Flash: ' + (flashEnabled ? 'ON' : 'OFF');"
+    "  document.getElementById('flashToggle').style.background = flashEnabled ? '#4CAF50' : '#666';"
+    "  document.getElementById('statusToggle').textContent = '🔴 Status: ' + (statusEnabled ? 'ON' : 'OFF');"
+    "  document.getElementById('statusToggle').style.background = statusEnabled ? '#4CAF50' : '#666';"
+    "}).catch(e=>console.error('Status load failed:', e));"
+    "</script>"
     "</div>"
     "</body></html>", -1);
   
