@@ -658,6 +658,30 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/html");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   
+  // Parse pagination parameters
+  int page = 1;
+  int perPage = 20; // Images per page
+  
+  char *buf = NULL;
+  size_t buf_len = httpd_req_get_url_query_len(req) + 1;
+  if (buf_len > 1) {
+    buf = (char *)malloc(buf_len);
+    if (buf && httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+      char pageStr[10];
+      if (httpd_query_key_value(buf, "page", pageStr, sizeof(pageStr)) == ESP_OK) {
+        page = atoi(pageStr);
+        if (page < 1) page = 1;
+      }
+      char perPageStr[10];
+      if (httpd_query_key_value(buf, "per", perPageStr, sizeof(perPageStr)) == ESP_OK) {
+        perPage = atoi(perPageStr);
+        if (perPage < 5) perPage = 5;
+        if (perPage > 50) perPage = 50;
+      }
+    }
+    if (buf) free(buf);
+  }
+  
   // Send HTML header in chunks to reduce stack usage
   httpd_resp_send_chunk(req, 
     "<!DOCTYPE html><html><head>"
@@ -669,16 +693,22 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
     ".header{text-align:center;margin-bottom:30px;}", -1);
     
   httpd_resp_send_chunk(req,
-    ".gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:15px;}"
-    ".image-card{background:white;border-radius:8px;padding:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);transition:transform 0.2s;}"
+    ".gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:15px;margin-bottom:30px;}"
+    ".image-card{background:white;border-radius:8px;padding:10px;box-shadow:0 2px 5px rgba(0,0,0,0.1);transition:transform 0.2s;position:relative;}"
     ".image-card:hover{transform:scale(1.05);}"
     ".image-card img{width:100%;height:150px;object-fit:cover;border-radius:4px;cursor:pointer;background:#f0f0f0;transition:all 0.3s;filter:brightness(0.9);}"
     ".image-card img:hover{filter:brightness(1);}"
     ".image-card img.loading{opacity:0.5;background:linear-gradient(90deg,#f0f0f0 25%,#e0e0e0 50%,#f0f0f0 75%);background-size:200% 100%;animation:loading 1.5s infinite;}"
     ".image-info{margin-top:8px;font-size:12px;color:#666;text-align:center;}"
+    ".new-badge{position:absolute;top:5px;right:5px;background:#ff4444;color:white;padding:2px 6px;border-radius:10px;font-size:10px;font-weight:bold;}"
     "@keyframes loading{0%{background-position:200% 0;}100%{background-position:-200% 0;}}", -1);
     
   httpd_resp_send_chunk(req,
+    ".pagination{display:flex;justify-content:center;align-items:center;margin:30px 0;gap:10px;flex-wrap:wrap;}"
+    ".page-btn{padding:8px 12px;margin:2px;background:white;border:1px solid #ddd;border-radius:4px;text-decoration:none;color:#333;transition:all 0.3s;}"
+    ".page-btn:hover{background:#4CAF50;color:white;border-color:#4CAF50;}"
+    ".page-btn.active{background:#4CAF50;color:white;border-color:#4CAF50;font-weight:bold;}"
+    ".page-info{color:#666;margin:0 15px;font-size:14px;}"
     ".no-images{text-align:center;color:#666;margin-top:50px;}"
     ".refresh-btn{background:#4CAF50;color:white;padding:10px 20px;border:none;border-radius:4px;cursor:pointer;margin:10px;}"
     ".refresh-btn:hover{background:#45a049;}"
@@ -691,22 +721,88 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
     "<h1>📷 ESP32-CAM Gallery</h1>"
     "<button class='refresh-btn' onclick='location.reload()'>🔄 Refresh</button>"
     "<button class='refresh-btn' onclick='location.href=\"/camera\"'>📹 Camera Controls</button>"
-    "</div>"
-    "<div class='gallery'>", -1);
+    "</div>", -1);
   
-  // List images from SD card
+  // Collect all image files first for sorting and pagination
+  String* imageFiles = nullptr;
+  size_t* imageSizes = nullptr;
+  int totalImages = 0;
+  
   File root = SD_MMC.open("/");
   if (!root) {
     httpd_resp_send_chunk(req, "<div class='no-images'>❌ Cannot access SD card</div>", -1);
   } else {
-    int imageCount = 0;
+    // First pass: count images
     File file = root.openNextFile();
     while (file) {
       String fileName = file.name();
-      
-      // Skip directories and non-jpg files
       if (!file.isDirectory() && (fileName.endsWith(".jpg") || fileName.endsWith(".JPG"))) {
-        imageCount++;
+        totalImages++;
+      }
+      file = root.openNextFile();
+    }
+    root.close();
+    
+    if (totalImages == 0) {
+      httpd_resp_send_chunk(req, "<div class='no-images'>📷 No images found on SD card</div>", -1);
+    } else {
+      // Allocate arrays for image data
+      imageFiles = new String[totalImages];
+      imageSizes = new size_t[totalImages];
+      
+      // Second pass: collect image data
+      root = SD_MMC.open("/");
+      file = root.openNextFile();
+      int index = 0;
+      while (file && index < totalImages) {
+        String fileName = file.name();
+        if (!file.isDirectory() && (fileName.endsWith(".jpg") || fileName.endsWith(".JPG"))) {
+          imageFiles[index] = fileName;
+          imageSizes[index] = file.size();
+          index++;
+        }
+        file = root.openNextFile();
+      }
+      root.close();
+      
+      // Sort images by filename (newest first - assuming img_xxx.jpg format)
+      for (int i = 0; i < totalImages - 1; i++) {
+        for (int j = i + 1; j < totalImages; j++) {
+          if (imageFiles[i] < imageFiles[j]) { // Reverse order for newest first
+            String tempFile = imageFiles[i];
+            size_t tempSize = imageSizes[i];
+            imageFiles[i] = imageFiles[j];
+            imageSizes[i] = imageSizes[j];
+            imageFiles[j] = tempFile;
+            imageSizes[j] = tempSize;
+          }
+        }
+      }
+      
+      // Calculate pagination
+      int totalPages = (totalImages + perPage - 1) / perPage;
+      if (page > totalPages) page = totalPages;
+      
+      int startIndex = (page - 1) * perPage;
+      int endIndex = startIndex + perPage;
+      if (endIndex > totalImages) endIndex = totalImages;
+      
+      // Display page info
+      char pageInfo[200];
+      snprintf(pageInfo, sizeof(pageInfo),
+        "<div class='page-info' style='text-align:center;margin-bottom:20px;'>"
+        "📷 Showing %d-%d of %d images (Page %d of %d) - Newest first"
+        "</div>",
+        startIndex + 1, endIndex, totalImages, page, totalPages);
+      httpd_resp_send_chunk(req, pageInfo, strlen(pageInfo));
+      
+      // Start gallery
+      httpd_resp_send_chunk(req, "<div class='gallery'>", -1);
+      
+      // Display images for current page
+      for (int i = startIndex; i < endIndex; i++) {
+        String fileName = imageFiles[i];
+        size_t fileSize = imageSizes[i];
         
         // Ensure filename starts with /
         String fullPath = fileName;
@@ -714,23 +810,86 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
           fullPath = "/" + fullPath;
         }
         
-        char imageCard[450];
+        // Check if this is a new image (last 10 images are considered "new")
+        bool isNew = (i < 10);
+        
+        char imageCard[550];
         snprintf(imageCard, sizeof(imageCard),
           "<div class='image-card'>"
+          "%s"
           "<img src='/image%s?thumb=1' alt='%s' onclick='window.open(\"/image%s\", \"_blank\")' loading='lazy'>"
           "<div class='image-info'>%s<br>%.1f KB</div>"
           "</div>",
+          isNew ? "<div class='new-badge'>NEW</div>" : "",
           fullPath.c_str(), fileName.c_str(), fullPath.c_str(), 
-          fileName.c_str(), file.size() / 1024.0);
+          fileName.c_str(), fileSize / 1024.0);
         
         httpd_resp_send_chunk(req, imageCard, strlen(imageCard));
       }
-      file = root.openNextFile();
-    }
-    root.close();
-    
-    if (imageCount == 0) {
-      httpd_resp_send_chunk(req, "<div class='no-images'>📷 No images found on SD card</div>", -1);
+      
+      httpd_resp_send_chunk(req, "</div>", -1); // Close gallery
+      
+      // Generate pagination controls
+      if (totalPages > 1) {
+        httpd_resp_send_chunk(req, "<div class='pagination'>", -1);
+        
+        // Previous button
+        if (page > 1) {
+          char prevBtn[100];
+          snprintf(prevBtn, sizeof(prevBtn), 
+            "<a href='/gallery?page=%d&per=%d' class='page-btn'>« Previous</a>", 
+            page - 1, perPage);
+          httpd_resp_send_chunk(req, prevBtn, strlen(prevBtn));
+        }
+        
+        // Page numbers
+        int startPage = (page > 3) ? page - 2 : 1;
+        int endPage = (page + 2 < totalPages) ? page + 2 : totalPages;
+        
+        if (startPage > 1) {
+          char firstBtn[80];
+          snprintf(firstBtn, sizeof(firstBtn), 
+            "<a href='/gallery?page=1&per=%d' class='page-btn'>1</a>", perPage);
+          httpd_resp_send_chunk(req, firstBtn, strlen(firstBtn));
+          if (startPage > 2) {
+            httpd_resp_send_chunk(req, "<span class='page-btn' style='border:none;'>...</span>", -1);
+          }
+        }
+        
+        for (int p = startPage; p <= endPage; p++) {
+          char pageBtn[100];
+          snprintf(pageBtn, sizeof(pageBtn), 
+            "<a href='/gallery?page=%d&per=%d' class='page-btn%s'>%d</a>", 
+            p, perPage, (p == page) ? " active" : "", p);
+          httpd_resp_send_chunk(req, pageBtn, strlen(pageBtn));
+        }
+        
+        if (endPage < totalPages) {
+          if (endPage < totalPages - 1) {
+            httpd_resp_send_chunk(req, "<span class='page-btn' style='border:none;'>...</span>", -1);
+          }
+          char lastBtn[80];
+          snprintf(lastBtn, sizeof(lastBtn), 
+            "<a href='/gallery?page=%d&per=%d' class='page-btn'>%d</a>", 
+            totalPages, perPage, totalPages);
+          httpd_resp_send_chunk(req, lastBtn, strlen(lastBtn));
+        }
+        
+        // Next button
+        if (page < totalPages) {
+          char nextBtn[100];
+          snprintf(nextBtn, sizeof(nextBtn), 
+            "<a href='/gallery?page=%d&per=%d' class='page-btn'>Next »</a>", 
+            page + 1, perPage);
+          httpd_resp_send_chunk(req, nextBtn, strlen(nextBtn));
+        }
+        
+        httpd_resp_send_chunk(req, "</div>", -1); // Close pagination
+      }
+      
+      // Cleanup
+      delete[] imageFiles;
+      delete[] imageSizes;
     }
   }
   
@@ -738,7 +897,8 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
   httpd_resp_send_chunk(req,
     "</div>"
     "<div style='text-align:center;margin-top:30px;color:#666;'>"
-    "<p>📷 Gallery optimized for fast browsing. Images are automatically resized for thumbnails. Click any image to view full size.</p>"
+    "<p>📷 Gallery with pagination for fast browsing. Newest images shown first. Click any image to view full size.</p>"
+    "<p style='font-size:12px;'>💡 Tip: Use ?per=10 or ?per=30 in URL to change images per page</p>"
     "</div>"
     "</div>"
     "<script>"
@@ -750,7 +910,7 @@ static esp_err_t gallery_handler(httpd_req_t *req) {
     "let loaded=0,total=document.querySelectorAll('img').length;"
     "document.querySelectorAll('img').forEach(img=>{"
     "img.addEventListener('load',()=>{"
-    "loaded++;if(loaded===total)console.log('All images loaded');"
+    "loaded++;if(loaded===total)console.log('Page images loaded: '+loaded+'/'+total);"
     "});"
     "});"
     "</script>"
